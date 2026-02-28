@@ -19,8 +19,8 @@ export async function POST(req: NextRequest) {
 
     if (!transactions) return NextResponse.json({ error: "No transactions found" }, { status: 404 });
 
-    const incomeInserts = [];
-    const expenseInserts = [];
+    const incomeInserts: any[] = [];
+    const expenseInserts: any[] = [];
 
     for (const tx of transactions) {
       const override = overrides?.[tx.id] ?? {};

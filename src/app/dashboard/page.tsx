@@ -105,7 +105,19 @@ export default function DashboardPage() {
               { label: "Total Income", value: fmt(totalIncome), sub: `${incomes.length} sources`, delay: 0 },
               { label: "Tax Payable", value: taxResult ? fmtFull(taxResult.taxPayable) : "—", sub: taxResult ? `Rate: ${taxResult.effectiveTaxRate}%` : "", accent: "amber", delay: 60 },
               { label: "TDS Deducted", value: fmtFull(totalTDS), sub: "Credited with IT dept", delay: 120 },
-              { label: taxResult?.refundDue && taxResult.refundDue > 0 ? "Refund Due" : "Balance Due", value: taxResult ? fmtFull(taxResult.refundDue > 0 ? taxResult.refundDue : Math.max(0, taxResult.taxPayable - advanceTaxPaid)) : "—", sub: taxResult?.refundDue > 0 ? "After advance tax" : "Pay by March 15", accent: taxResult?.refundDue > 0 ? "green" : "red", delay: 180 },
+              {
+  label: (taxResult?.refundDue ?? 0) > 0 ? "Refund Due" : "Balance Due",
+  value: taxResult
+    ? fmtFull(
+        (taxResult?.refundDue ?? 0) > 0
+          ? (taxResult?.refundDue ?? 0)
+          : Math.max(0, taxResult.taxPayable - advanceTaxPaid)
+      )
+    : "—",
+  sub: (taxResult?.refundDue ?? 0) > 0 ? "After advance tax" : "Pay by March 15",
+  accent: (taxResult?.refundDue ?? 0) > 0 ? "green" : "red",
+  delay: 180,
+},
             ].map(s => (
               <div key={s.label} className="au card" style={{ animationDelay: `${s.delay}ms` }}>
                 <p className="label">{s.label}</p>

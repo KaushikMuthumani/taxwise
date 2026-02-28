@@ -110,18 +110,39 @@ export default function SettingsPage() {
           <p style={{ fontFamily: "var(--font-head)", fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Tax Regime Preference</p>
           <p style={{ fontSize: 13, color: "var(--muted)", marginBottom: 18 }}>Your dashboard always shows both — this sets the default for filing</p>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {[
-              { value: "new", label: "New Regime", desc: "Lower rates, no deductions. Best for most freelancers.", recommended: true },
-              { value: "old", label: "Old Regime", desc: "Higher rates but 80C, 80D, HRA deductions allowed." },
-            ].map(r => (
-              <button key={r.value} onClick={() => setRegime(r.value)} style={{ padding: "16px 18px", background: regime === r.value ? "var(--amber-dim)" : "var(--surface2)", border: `1px solid ${regime === r.value ? "var(--amber-border)" : "var(--border)"}`, borderRadius: "var(--r)", cursor: "pointer", textAlign: "left", fontFamily: "var(--font-body)", transition: "all 0.14s" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: regime === r.value ? "var(--amber)" : "var(--text)" }}>{r.label}</span>
-                  {r.recommended && <span className="badge badge-amber" style={{ fontSize: 9 }}>RECOMMENDED</span>}
-                </div>
-                <p style={{ fontSize: 12, color: "var(--muted)" }}>{r.desc}</p>
-              </button>
-            ))}
+            {(
+  [
+    { value: "new", label: "New Regime", desc: "Lower rates, no deductions. Best for most freelancers.", recommended: true },
+    { value: "old", label: "Old Regime", desc: "Higher rates but 80C, 80D, HRA deductions allowed." },
+  ] as const
+).map((r) => (
+  <button
+    key={r.value}
+    onClick={() => setRegime(r.value)}
+    style={{
+      padding: "16px 18px",
+      background: regime === r.value ? "var(--amber-dim)" : "var(--surface2)",
+      border: `1px solid ${regime === r.value ? "var(--amber-border)" : "var(--border)"}`,
+      borderRadius: "var(--r)",
+      cursor: "pointer",
+      textAlign: "left",
+      fontFamily: "var(--font-body)",
+      transition: "all 0.14s",
+    }}
+  >
+    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+      <span style={{ fontSize: 13, fontWeight: 600, color: regime === r.value ? "var(--amber)" : "var(--text)" }}>
+        {r.label}
+      </span>
+      {"recommended" in r && r.recommended && (
+        <span className="badge badge-amber" style={{ fontSize: 9 }}>
+          RECOMMENDED
+        </span>
+      )}
+    </div>
+    <p style={{ fontSize: 12, color: "var(--muted)" }}>{r.desc}</p>
+  </button>
+))}
           </div>
         </div>
 

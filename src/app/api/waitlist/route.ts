@@ -1,46 +1,58 @@
-import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase";
-import { Resend } from "resend";
+// src/app/api/waitlist/route.ts
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabase"; // keep this import if that's where you export it
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+type WaitlistBody = {
+  email?: string;
+  name?: string;
+  profession?: string;
+};
 
-export async function POST(req: NextRequest) {
+function isValidEmail(email: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+export async function POST(req: Request) {
   try {
-    const { email, name, profession } = await req.json();
+    // ✅ If admin client is not configured, don't crash build/runtime silently
+    if (!supabaseAdmin) {
+      return NextResponse.json(
+        {
+          error:
+            "Server is missing SUPABASE_SERVICE_ROLE_KEY. Add it in Vercel Environment Variables.",
+        },
+        { status: 500 }
+      );
+    }
 
-    if (!email) return NextResponse.json({ error: "Email required" }, { status: 400 });
+    const body = (await req.json()) as WaitlistBody;
+
+    const email = (body.email ?? "").trim().toLowerCase();
+    const name = (body.name ?? "").trim();
+    const profession = (body.profession ?? "").trim();
+
+    if (!email || !isValidEmail(email)) {
+      return NextResponse.json({ error: "Valid email is required" }, { status: 400 });
+    }
 
     // Save to Supabase
     const { error } = await supabaseAdmin
       .from("waitlist")
-      .insert({ email, name, profession, source: "landing_page" });
+      .insert({ email, name: name || null, profession: profession || null, source: "landing_page" });
 
-    if (error && error.code !== "23505") { // 23505 = unique violation (already exists)
+    if (error) {
+      // If duplicate email constraint exists
+      if (error.code === "23505") {
+        return NextResponse.json({ ok: true, message: "Already on waitlist" }, { status: 200 });
+      }
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    // Send welcome email via Resend
-    await resend.emails.send({
-      from: "Taxwise <hello@taxwise.in>",
-      to: email,
-      subject: "You're on the Taxwise waitlist 🎉",
-      html: `
-        <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 40px 24px; background: #0a0a0f; color: #e8e8f0;">
-          <h2 style="color: #f5a623; font-size: 24px; margin-bottom: 16px;">You're on the list!</h2>
-          <p style="color: #9898aa; line-height: 1.6; margin-bottom: 16px;">
-            Thanks for joining the Taxwise waitlist. We're building the tax tool that Indian freelancers actually deserve — not another form-filling wizard.
-          </p>
-          <p style="color: #9898aa; line-height: 1.6; margin-bottom: 16px;">
-            We'll email you as soon as we launch early access. You're one of the first.
-          </p>
-          <p style="color: #6b6b80; font-size: 13px; margin-top: 32px;">— Taxwise Team</p>
-        </div>
-      `,
-    });
-
-    return NextResponse.json({ success: true });
-  } catch (err) {
-    console.error("Waitlist error:", err);
-    return NextResponse.json({ error: "Something went wrong" }, { status: 500 });
+    return NextResponse.json({ ok: true }, { status: 200 });
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message ?? "Unexpected error" },
+      { status: 500 }
+    );
   }
 }

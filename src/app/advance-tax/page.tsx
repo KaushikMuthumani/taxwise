@@ -1,147 +1,176 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import AppLayout from "@/components/AppLayout";
-import { useTaxData } from "@/hooks/useTaxData";
 import { useAuth } from "@/lib/AuthContext";
 import { supabase } from "@/lib/supabase";
+import { useTaxData } from "@/hooks/useTaxData";
 
-function fmt(n: number) { return `₹${n.toLocaleString("en-IN")}`; }
+function fmtFull(n: number) { return `₹${n.toLocaleString("en-IN")}`; }
+
+const now = new Date();
+const QUARTERS = [
+  { q: "Q1", label: "First Quarter", deadline: "15 Jun 2024", pct: 15, dueDate: new Date("2024-06-15") },
+  { q: "Q2", label: "Second Quarter", deadline: "15 Sep 2024", pct: 45, dueDate: new Date("2024-09-15") },
+  { q: "Q3", label: "Third Quarter", deadline: "15 Dec 2024", pct: 75, dueDate: new Date("2024-12-15") },
+  { q: "Q4", label: "Fourth Quarter", deadline: "15 Mar 2025", pct: 100, dueDate: new Date("2025-03-15") },
+].map(q => ({ ...q, isPast: q.dueDate < now }));
 
 export default function AdvanceTaxPage() {
   const { user } = useAuth();
-  const { taxResult, advanceTax, loading, refetch, totalIncome, advanceTaxPaid } = useTaxData();
-  const [paying, setPaying] = useState<string | null>(null);
-  const [challan, setChallan] = useState("");
-  const [amount, setAmount] = useState("");
+  const { taxResult, advanceTax, advanceTaxPaid, refetch, loading } = useTaxData();
+  const [payments, setPayments] = useState<Record<string, { amount_paid: number; paid_on: string; challan_number: string }>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState<string | null>(null);
+
+  useEffect(() => {
+    const map: Record<string, any> = {};
+    advanceTax.forEach(a => { map[a.quarter] = { amount_paid: a.amount_paid, paid_on: a.paid_on ?? "", challan_number: a.challan_number ?? "" }; });
+    setPayments(map);
+  }, [advanceTax]);
+
+  const totalTax = taxResult?.taxPayable ?? 0;
 
   async function markPaid(quarter: string) {
-    if (!user || !amount) return;
-    const existing = advanceTax.find(a => a.quarter === quarter);
-    if (existing) {
-      await supabase.from("advance_tax_payments").update({ amount_paid: parseFloat(amount), paid_on: new Date().toISOString().split("T")[0], challan_number: challan || null }).eq("id", existing.id);
-    } else {
-      await supabase.from("advance_tax_payments").insert({ user_id: user.id, financial_year: "2024-25", quarter, amount_paid: parseFloat(amount), paid_on: new Date().toISOString().split("T")[0], challan_number: challan || null });
-    }
-    await refetch(); setPaying(null); setChallan(""); setAmount("");
+    if (!user) return;
+    const p = payments[quarter];
+    if (!p?.amount_paid) return;
+    setSaving(quarter);
+    await supabase.from("advance_tax_payments").upsert({
+      user_id: user.id,
+      financial_year: "2024-25",
+      quarter,
+      amount_paid: p.amount_paid,
+      paid_on: p.paid_on || new Date().toISOString().split("T")[0],
+      challan_number: p.challan_number || null,
+    }, { onConflict: "user_id,financial_year,quarter" });
+    await refetch();
+    setShowForm(null);
+    setSaving(null);
   }
 
-  const schedule = taxResult?.advanceTaxSchedule ?? [];
-  const totalDue = schedule.reduce((s, q) => s + q.amountDueThisQuarter, 0);
-  const shortfall = Math.max(0, totalDue - advanceTaxPaid);
+  // Per-quarter amounts
+  const scheduleAmounts = QUARTERS.map((q, i) => {
+    const prevPct = i > 0 ? QUARTERS[i - 1].pct : 0;
+    return Math.round(totalTax * (q.pct - prevPct) / 100);
+  });
+
+  const totalPaid = Object.values(payments).reduce((s, p) => s + (p.amount_paid || 0), 0);
 
   return (
-    <AppLayout>
-      <div style={{ padding: "40px 48px", maxWidth: 900 }}>
+    <AppLayout title="Advance Tax" subtitle="Quarterly schedule · FY 2024–25">
+      {/* Summary cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 24 }}>
+        {[
+          { label: "Annual Tax Liability", val: fmtFull(totalTax), bg: "var(--purple-bg)", color: "var(--purple2)" },
+          { label: "Total Advance Tax Paid", val: fmtFull(totalPaid), bg: "var(--green-card)", color: "var(--green-text)" },
+          { label: "Remaining", val: fmtFull(Math.max(0, totalTax - totalPaid)), bg: "var(--amber)", color: "var(--amber-text)" },
+        ].map(c => (
+          <div key={c.label} className="au" style={{ background: c.bg, borderRadius: "var(--r-lg)", padding: "18px 20px", boxShadow: "var(--shadow-sm)" }}>
+            <div style={{ fontSize: 11, color: "var(--ink3)", fontWeight: 500, marginBottom: 8 }}>{c.label}</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: c.color, letterSpacing: "-0.5px" }}>{c.val}</div>
+          </div>
+        ))}
+      </div>
 
-        <div className="au" style={{ marginBottom: 32 }}>
-          <h1 className="page-title">Advance Tax</h1>
-          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>FY 2024–25 · Pay in 4 quarterly instalments</p>
-        </div>
+      {/* Quarter cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 28 }}>
+        {QUARTERS.map((q, i) => {
+          const paid = payments[q.q];
+          const isDone = paid && paid.amount_paid > 0;
+          const due = scheduleAmounts[i];
+          const now = new Date();
+          const daysLeft = Math.ceil((q.dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+          const isShowingForm = showForm === q.q;
 
-        {/* Summary */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, marginBottom: 28 }}>
+          return (
+            <div key={q.q} className={`quarter-card ${isDone ? "done" : q.isPast ? "late" : "due"}`}>
+              {/* Quarter header */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                <div>
+                  <span style={{ fontSize: 20, fontWeight: 800, color: "var(--ink)" }}>{q.q}</span>
+                  <div style={{ fontSize: 11, color: "var(--ink4)", marginTop: 1 }}>{q.pct}% cumulative</div>
+                </div>
+                <div style={{
+                  width: 9, height: 9, borderRadius: "50%", marginTop: 6,
+                  background: isDone ? "var(--green-text)" : q.isPast ? "var(--red-text)" : "var(--purple)",
+                  boxShadow: isDone ? "0 0 6px var(--green-text)" : q.isPast ? "0 0 6px var(--red-text)" : "0 0 6px var(--purple)",
+                }}/>
+              </div>
+
+              <div style={{ fontSize: 11, color: "var(--ink4)", marginBottom: 8 }}>{q.deadline}</div>
+              <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.5px", marginBottom: 6 }}>{fmtFull(due)}</div>
+
+              {/* Status */}
+              {isDone ? (
+                <div style={{ fontSize: 12, color: "var(--green-text)", fontWeight: 600, marginBottom: 12 }}>
+                  ✓ Paid {fmtFull(paid.amount_paid)}
+                  {paid.paid_on && <div style={{ fontSize: 10, color: "var(--ink4)", fontWeight: 400, marginTop: 1 }}>{paid.paid_on}</div>}
+                </div>
+              ) : q.isPast ? (
+                <div style={{ fontSize: 12, color: "var(--red-text)", fontWeight: 500, marginBottom: 12 }}>⚠ Overdue</div>
+              ) : (
+                <div style={{ fontSize: 12, color: daysLeft <= 7 ? "var(--red-text)" : "var(--purple)", fontWeight: 500, marginBottom: 12 }}>
+                  {daysLeft > 0 ? `${daysLeft} days left` : "Due today"}
+                </div>
+              )}
+
+              {/* Form or button */}
+              {!isDone && (
+                isShowingForm ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <input className="input" type="number" placeholder="Amount paid (₹)" style={{ fontSize: 12, padding: "7px 10px" }}
+                      value={payments[q.q]?.amount_paid || ""} onChange={e => setPayments(prev => ({ ...prev, [q.q]: { ...prev[q.q], amount_paid: parseFloat(e.target.value) || 0, paid_on: prev[q.q]?.paid_on ?? "", challan_number: prev[q.q]?.challan_number ?? "" } }))}/>
+                    <input className="input" type="date" style={{ fontSize: 12, padding: "7px 10px" }}
+                      value={payments[q.q]?.paid_on || new Date().toISOString().split("T")[0]} onChange={e => setPayments(prev => ({ ...prev, [q.q]: { ...prev[q.q], paid_on: e.target.value } }))}/>
+                    <input className="input" type="text" placeholder="Challan no. (optional)" style={{ fontSize: 12, padding: "7px 10px" }}
+                      value={payments[q.q]?.challan_number || ""} onChange={e => setPayments(prev => ({ ...prev, [q.q]: { ...prev[q.q], challan_number: e.target.value } }))}/>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button className="btn btn-primary" style={{ flex: 1, fontSize: 11, padding: "7px 10px" }} onClick={() => markPaid(q.q)} disabled={saving === q.q}>
+                        {saving === q.q ? "Saving..." : "Mark Paid ✓"}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "7px 10px" }} onClick={() => setShowForm(null)}>✕</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <button className="btn btn-primary" style={{ width: "100%", fontSize: 12 }} onClick={() => setShowForm(q.q)}>
+                      Mark as Paid
+                    </button>
+                    <a href="https://onlineservices.tin.egov-nsdl.com/etaxnew/tdsnontds.jsp" target="_blank" rel="noopener"
+                      className="btn btn-ghost" style={{ width: "100%", fontSize: 11, textAlign: "center", textDecoration: "none" }}>
+                      Pay via NSDL →
+                    </a>
+                  </div>
+                )
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* How to pay */}
+      <div className="card au">
+        <div className="section-title">How to pay advance tax</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           {[
-            { label: "Total Tax Due", value: fmt(totalDue), sub: "All 4 quarters" },
-            { label: "Paid So Far", value: fmt(advanceTaxPaid), sub: `${advanceTax.filter(a => a.amount_paid > 0).length} quarters paid`, color: "var(--green)" },
-            { label: "Balance Remaining", value: fmt(shortfall), sub: shortfall > 0 ? "Pay to avoid interest" : "You're all caught up ✓", color: shortfall > 0 ? "var(--red)" : "var(--green)" },
-          ].map((s, i) => (
-            <div key={i} className="au card" style={{ animationDelay: `${i * 60}ms` }}>
-              <p className="label">{s.label}</p>
-              <p className="stat-num" style={{ color: s.color ?? "var(--text)" }}>{s.value}</p>
-              <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>{s.sub}</p>
+            { step: "1", title: "Go to NSDL Portal", desc: "Visit onlineservices.tin.egov-nsdl.com" },
+            { step: "2", title: "Select ITNS 280", desc: "Choose Income Tax → Advance Tax (code 100)" },
+            { step: "3", title: "Enter your PAN & Amount", desc: "Assessment year 2025-26, amount from above" },
+            { step: "4", title: "Pay & Note Challan No.", desc: "Save the BSR code + challan serial number" },
+          ].map(s => (
+            <div key={s.step} style={{ display: "flex", gap: 12 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--purple-bg)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: "var(--purple2)", flexShrink: 0 }}>{s.step}</div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{s.title}</div>
+                <div style={{ fontSize: 12, color: "var(--ink3)" }}>{s.desc}</div>
+              </div>
             </div>
           ))}
         </div>
-
-        {/* No income state */}
-        {!loading && totalIncome === 0 && (
-          <div className="au card" style={{ textAlign: "center", padding: "48px", borderStyle: "dashed" }}>
-            <p style={{ fontSize: 14, color: "var(--muted)" }}>Add income to see your advance tax schedule</p>
-          </div>
-        )}
-
-        {/* Quarter cards */}
-        {schedule.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 16, marginBottom: 28 }}>
-            {schedule.map((q, i) => {
-              const paid = advanceTax.find(a => a.quarter === q.quarter);
-              const paidAmt = paid?.amount_paid ?? 0;
-              const isDone = paidAmt >= q.amountDueThisQuarter && q.amountDueThisQuarter > 0;
-              const isOverdue = q.isPast && !isDone && q.amountDueThisQuarter > 0;
-              const borderColor = isDone ? "var(--green-border)" : isOverdue ? "rgba(255,69,96,0.25)" : q.amountDueThisQuarter > 0 ? "var(--amber-border)" : "var(--border)";
-              return (
-                <div key={q.quarter} className="au card" style={{ borderColor, animationDelay: `${i * 80}ms` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontFamily: "var(--font-head)", fontSize: 18, fontWeight: 700 }}>{q.quarter}</span>
-                        <div style={{ width: 7, height: 7, borderRadius: "50%", background: isDone ? "var(--green)" : isOverdue ? "var(--red)" : "var(--amber)" }} />
-                      </div>
-                      <p style={{ fontSize: 12, color: "var(--muted)" }}>Due: {q.deadline}</p>
-                      {q.daysRemaining !== null && !q.isPast && <p style={{ fontSize: 12, color: "var(--amber)", marginTop: 2 }}>{q.daysRemaining} days remaining</p>}
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <p className="stat-num" style={{ fontSize: 22 }}>{fmt(q.amountDueThisQuarter)}</p>
-                      {paidAmt > 0 && <p style={{ fontSize: 11, color: "var(--green)", marginTop: 2 }}>✓ Paid {fmt(paidAmt)}</p>}
-                      {paid?.challan_number && <p style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>{paid.challan_number}</p>}
-                    </div>
-                  </div>
-
-                  {paying === q.quarter ? (
-                    <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                        <div>
-                          <p className="label">Amount Paid</p>
-                          <input className="input" type="number" placeholder={fmt(q.amountDueThisQuarter)} value={amount} onChange={e => setAmount(e.target.value)} />
-                        </div>
-                        <div>
-                          <p className="label">Challan No. (optional)</p>
-                          <input className="input" placeholder="ITNS280-..." value={challan} onChange={e => setChallan(e.target.value)} />
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button className="btn btn-primary" disabled={!amount} onClick={() => markPaid(q.quarter)} style={{ flex: 1 }}>Confirm Payment</button>
-                        <button className="btn btn-ghost" onClick={() => { setPaying(null); setAmount(""); setChallan(""); }}>Cancel</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-                      {!isDone && (
-                        <button className="btn btn-ghost" style={{ flex: 1, fontSize: 12 }} onClick={() => { setPaying(q.quarter); setAmount(q.amountDueThisQuarter.toString()); }}>
-                          Mark as Paid
-                        </button>
-                      )}
-                      <a href="https://onlineservices.tin.egov-nsdl.com/etaxnew/tdsnontds.jsp" target="_blank" rel="noopener" className="btn btn-primary" style={{ flex: isDone ? 2 : 1, fontSize: 12, textDecoration: "none" }}>
-                        Pay on IT Portal →
-                      </a>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* How to pay guide */}
-        <div className="au card" style={{ animationDelay: "0.35s" }}>
-          <p style={{ fontFamily: "var(--font-head)", fontSize: 15, fontWeight: 600, marginBottom: 18 }}>How to Pay Advance Tax (Challan 280)</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {[
-              { n: "1", title: "Go to IT Portal", desc: "Visit onlineservices.tin.egov-nsdl.com and click 'e-Payment of Taxes'" },
-              { n: "2", title: "Select Challan 280", desc: "Choose ITNS 280 — for Income Tax payment" },
-              { n: "3", title: "Select Advance Tax", desc: "Assessment Year: 2025-26 · Type of Payment: (100) Advance Tax" },
-              { n: "4", title: "Enter PAN & amount", desc: "PAN, bank details, exact amount from above schedule" },
-              { n: "5", title: "Save the challan", desc: "Download and save the Challan 280 receipt — enter number above to track" },
-            ].map(s => (
-              <div key={s.n} style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
-                <div style={{ width: 26, height: 26, borderRadius: "50%", background: "var(--amber-dim)", border: "1px solid var(--amber-border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-head)", fontWeight: 700, fontSize: 11, color: "var(--amber)" }}>{s.n}</div>
-                <div>
-                  <p style={{ fontWeight: 500, fontSize: 13 }}>{s.title}</p>
-                  <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{s.desc}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+        <div style={{ marginTop: 16 }}>
+          <a href="https://onlineservices.tin.egov-nsdl.com/etaxnew/tdsnontds.jsp" target="_blank" rel="noopener" className="btn btn-primary" style={{ textDecoration: "none" }}>
+            Open NSDL Portal →
+          </a>
         </div>
       </div>
     </AppLayout>

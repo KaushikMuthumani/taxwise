@@ -5,12 +5,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 import { cookies } from "next/headers";
 
-
-
-
 // ─── Parse raw bank statement text into structured transactions ───────────
 async function parseTransactionsFromText(rawText: string, bankName: string): Promise<any[]> {
-  const prompt = `You are a bank statement parser for Indian banks. Extract all transactions from this bank statement text.
+  const prompt = `You are a bank statement parser for Indian banks. Extract ALL transactions from this bank statement text.
 
 Bank: ${bankName}
 
@@ -18,13 +15,13 @@ Raw statement text:
 ${rawText.slice(0, 8000)}
 
 Return ONLY a valid JSON array of transactions. Each transaction must have:
-- date: "YYYY-MM-DD" format
-- description: the full transaction description
+- date: "YYYY-MM-DD" format (infer year from context — typically 2024 or 2025 for FY 2024-25)
+- description: the full transaction description as-is
 - amount: number (always positive)
 - type: "credit" or "debit"
 - balance: number or null
 
-Return ONLY the JSON array, no other text, no markdown.`;
+Include EVERY transaction. Return ONLY the JSON array, no other text, no markdown.`;
 
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
@@ -45,7 +42,6 @@ Return ONLY the JSON array, no other text, no markdown.`;
 async function classifyTransactions(transactions: any[], profession: string): Promise<any[]> {
   if (transactions.length === 0) return [];
 
-  // Process in batches of 30 to stay within token limits
   const batchSize = 30;
   const results: any[] = [];
 
@@ -57,31 +53,26 @@ async function classifyTransactions(transactions: any[], profession: string): Pr
 The user is a ${profession.replace("_", " ")} freelancer filing ITR-4 under Section 44ADA.
 
 Classify each transaction into ONE of these categories:
-- "professional_income": Payment received for freelance/professional work (client payments, project fees, Upwork/Fiverr transfers, Paypal receipts for work)
-- "personal_transfer": Personal money movement (family transfers, own account transfers, loan repayments from friends)
-- "business_expense": Work-related expense (software subscriptions, internet bill, equipment, coworking, travel for work)
-- "tds_deduction": TDS deducted by client (usually small amounts labeled TDS/IT deduction)  
-- "advance_tax": Income tax advance payment (labeled ITNS 280, advance tax, self assessment tax)
-- "salary": Regular monthly salary if employed
-- "ignore": ATM withdrawals, personal purchases, rent, groceries, utilities, EMIs
+- "professional_income": Payment received for freelance/professional work. Includes: client payments, project fees, Upwork/Fiverr/Toptal, PayPal/Payoneer/Wise/Stripe credits for services, foreign SWIFT remittances, Razorpay payouts.
+- "personal_transfer": Personal money — family transfers, own account transfers, friend loan repayments.
+- "business_expense": Work-related DEBIT — software (GitHub/Figma/Adobe/AWS/GSuite/Notion/Slack/Zoom), internet bill, mobile bill, equipment (laptop/monitor), coworking, work travel.
+- "tds_deduction": TDS deducted by client — DEBIT labeled TDS/Income Tax/IT Deduction, typically 10% of a nearby income credit.
+- "advance_tax": Tax payment to IT dept — DEBIT labeled ITNS 280, advance tax, self assessment tax, challan.
+- "salary": Regular monthly salary from same employer.
+- "ignore": ATM withdrawals, personal UPI, Amazon/Flipkart shopping, rent, groceries, utility bills, EMIs, personal insurance, SIP investments.
+
+For suggested_income_type:
+- "freelance_foreign": PayPal/Payoneer/Wise credit, SWIFT inward remittance, USD/EUR/GBP amount, Stripe, Deel, Remote.com, foreign company name.
+- "freelance_indian": NEFT/RTGS/IMPS from Indian company, Razorpay business payout, Indian Pvt Ltd/LLP client.
+- "gig": Swiggy/Zomato/Ola/Rapido/Urban Company earnings.
+- "creator": YouTube AdSense, Instagram, course sales, newsletter revenue.
 
 Transactions to classify:
-${JSON.stringify(batch.map((t: any, idx: number) => ({ idx, date: t.date, description: t.description, amount: t.amount, type: t.type })), null, 2)}
+${JSON.stringify(batch.map((t: any, localIdx: number) => ({ idx: i + localIdx, date: t.date, description: t.description, amount: t.amount, type: t.type })), null, 2)}
 
-Return ONLY a JSON array with one object per transaction:
-[
-  {
-    "idx": 0,
-    "classification": "professional_income",
-    "confidence": 0.95,
-    "reason": "Payment from Upwork - typical freelance platform transfer",
-    "suggested_income_type": "freelance_foreign",
-    "suggested_category": null
-  }
-]
+Return ONLY a JSON array with idx matching the input idx values (starting at ${i}):
+[{"idx": ${i}, "classification": "...", "confidence": 0.95, "reason": "...", "suggested_income_type": null, "suggested_category": null}]
 
-For business_expense, set suggested_category to: "software" | "internet" | "phone" | "travel" | "equipment" | "home_office" | "other"
-For professional_income, set suggested_income_type to: "freelance_indian" | "freelance_foreign" | "gig" | "creator" | "other"
 Return ONLY valid JSON array.`;
 
     const response = await groq.chat.completions.create({
@@ -94,10 +85,16 @@ Return ONLY valid JSON array.`;
     try {
       const clean = text.replace(/```json|```/g, "").trim();
       const classified = JSON.parse(clean);
-      results.push(...classified);
+      // Fix idx if AI reset it to 0-based for this batch
+      const corrected = classified.map((c: any, localIdx: number) => ({
+        ...c,
+        idx: typeof c.idx === "number" && c.idx >= i ? c.idx : i + localIdx,
+      }));
+      results.push(...corrected);
     } catch {
-      // If parse fails, mark all as unclassified
-      batch.forEach((_: any, idx: number) => results.push({ idx: i + idx, classification: "ignore", confidence: 0, reason: "Parse error" }));
+      batch.forEach((_: any, localIdx: number) => {
+        results.push({ idx: i + localIdx, classification: "ignore", confidence: 0, reason: "Parse error" });
+      });
     }
   }
 
@@ -116,19 +113,16 @@ export async function POST(req: NextRequest) {
     const bankName = formData.get("bank_name") as string || "Unknown Bank";
 
     if (!file) return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
-    if (!file.name.endsWith(".pdf")) return NextResponse.json({ error: "Only PDF files accepted" }, { status: 400 });
+    if (!file.name.toLowerCase().endsWith(".pdf")) return NextResponse.json({ error: "Only PDF files accepted" }, { status: 400 });
     if (file.size > 10 * 1024 * 1024) return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 400 });
 
-    // Get user profile for profession context
     const { data: profile } = await supabase.from("profiles").select("profession").eq("id", user.id).single();
     const profession = profile?.profession ?? "software_developer";
 
-    // Upload PDF to Supabase storage
     const fileBuffer = await file.arrayBuffer();
     const fileName = `${user.id}/${Date.now()}-${file.name}`;
     await supabase.storage.from("statements").upload(fileName, fileBuffer, { contentType: "application/pdf" });
 
-    // Create statement record
     const { data: statement } = await supabase.from("parsed_statements").insert({
       user_id: user.id,
       filename: file.name,
@@ -138,73 +132,80 @@ export async function POST(req: NextRequest) {
 
     if (!statement) return NextResponse.json({ error: "Failed to create statement record" }, { status: 500 });
 
-    // Extract text from PDF using pdf-parse
     const pdfParse = (await import("pdf-parse")).default;
     const pdfData = await pdfParse(Buffer.from(fileBuffer));
     const rawText = pdfData.text;
 
-    // Step 1: Parse transactions from raw text using AI
+    if (!rawText || rawText.trim().length < 50) {
+      await supabase.from("parsed_statements").update({ status: "error" }).eq("id", statement.id);
+      return NextResponse.json({ error: "Could not extract text from this PDF. It may be scanned/image-based. Try a text-based PDF bank statement." }, { status: 422 });
+    }
+
     const transactions = await parseTransactionsFromText(rawText, bankName);
 
     if (transactions.length === 0) {
       await supabase.from("parsed_statements").update({ status: "error", raw_text: rawText }).eq("id", statement.id);
-      return NextResponse.json({ error: "Could not extract transactions from this PDF. Try a different format." }, { status: 422 });
+      return NextResponse.json({ error: "Could not extract transactions from this PDF. Please check the file and try again." }, { status: 422 });
     }
 
-    // Step 2: Classify each transaction using AI
     const classifications = await classifyTransactions(transactions, profession);
+    const classificationMap = new Map(classifications.map((c: any) => [c.idx, c]));
 
-    // Step 3: Merge classifications back into transactions
     const classified = transactions.map((t: any, idx: number) => {
-      const cls = classifications.find((c: any) => c.idx === idx) ?? { classification: "ignore", confidence: 0, reason: "" };
+      const cls = classificationMap.get(idx) ?? { classification: "ignore", confidence: 0, reason: "" };
       return {
         user_id: user.id,
         statement_id: statement.id,
         date: t.date,
         description: t.description,
-        amount: t.amount,
+        amount: Math.abs(Number(t.amount) || 0),
         type: t.type,
-        balance: t.balance,
+        balance: t.balance ?? null,
         classification: cls.classification,
-        classification_confidence: cls.confidence,
-        classification_reason: cls.reason,
+        classification_confidence: cls.confidence ?? 0,
+        classification_reason: cls.reason ?? null,
         suggested_category: cls.suggested_category ?? null,
         suggested_income_type: cls.suggested_income_type ?? null,
         user_confirmed: false,
       };
     });
 
-    // Step 4: Save all transactions to DB
-    await supabase.from("raw_transactions").insert(classified);
+    const { data: insertedTransactions, error: insertErr } = await supabase
+      .from("raw_transactions")
+      .insert(classified)
+      .select("*");
+    
+    if (insertErr || !insertedTransactions) {
+      await supabase.from("parsed_statements").update({ status: "error" }).eq("id", statement.id);
+      return NextResponse.json({ error: "Failed to save transactions" }, { status: 500 });
+    }
 
-    // Step 5: Update statement status
     const classifiedCount = classified.filter((t: any) => t.classification !== "ignore").length;
     await supabase.from("parsed_statements").update({
       status: "done",
       total_transactions: classified.length,
       classified_transactions: classifiedCount,
-      raw_text: rawText.slice(0, 5000), // store first 5k chars
+      raw_text: rawText.slice(0, 5000),
     }).eq("id", statement.id);
 
-    // Return summary
-    const incomeTransactions = classified.filter((t: any) => t.classification === "professional_income" || t.classification === "salary");
-    const expenseTransactions = classified.filter((t: any) => t.classification === "business_expense");
-    const tdsTransactions = classified.filter((t: any) => t.classification === "tds_deduction");
+    const incomeTransactions = insertedTransactions.filter((t: any) => t.classification === "professional_income" || t.classification === "salary");
+    const expenseTransactions = insertedTransactions.filter((t: any) => t.classification === "business_expense");
+    const tdsTransactions = insertedTransactions.filter((t: any) => t.classification === "tds_deduction");
 
     return NextResponse.json({
       success: true,
       statementId: statement.id,
       summary: {
-        total: classified.length,
+        total: insertedTransactions.length,
         income: incomeTransactions.length,
         expenses: expenseTransactions.length,
         tds: tdsTransactions.length,
-        ignored: classified.filter((t: any) => t.classification === "ignore").length,
+        ignored: insertedTransactions.filter((t: any) => t.classification === "ignore").length,
         totalIncomeAmount: incomeTransactions.reduce((s: number, t: any) => s + t.amount, 0),
         totalExpenseAmount: expenseTransactions.reduce((s: number, t: any) => s + t.amount, 0),
         totalTDSAmount: tdsTransactions.reduce((s: number, t: any) => s + t.amount, 0),
       },
-      transactions: classified,
+      transactions: insertedTransactions,
     });
 
   } catch (err) {
